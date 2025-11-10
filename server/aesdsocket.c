@@ -67,6 +67,19 @@ int main(int argc, char **argv) {
     return -1;
   }
 
+  if (argc > 1 && strcmp(argv[1], "-d") == 0) {
+    pid_t pid = fork();
+
+    if (pid < 0) {
+      return -1;
+    } else if (pid == 0) // Child process
+    {
+    } else // Parent process
+    {
+      return 0;
+    }
+  }
+
   freeaddrinfo(res);
 
   if (listen(fd, 10)) {
