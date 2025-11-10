@@ -106,7 +106,10 @@ int main(int argc, char **argv) {
     char inbuffer[1024] = {0};
     int bytesread = 0;
     while ((bytesread = recv(clientfd, inbuffer, sizeof(inbuffer), 0)) > 0) {
-      write(wfd, inbuffer, bytesread);
+      ssize_t byteswritten = write(wfd, inbuffer, bytesread);
+      if (byteswritten < 0) {
+        return -1;
+      }
       if (inbuffer[bytesread - 1] == '\n') {
         break;
       }
