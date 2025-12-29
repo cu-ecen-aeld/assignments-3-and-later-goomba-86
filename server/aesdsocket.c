@@ -19,6 +19,7 @@
 static int fd = 0;
 static char const *const stringdata = "/var/tmp/aesdsocketdata";
 static bool sigterm_received = false;
+static pthread_t time_logger_thread;
 
 typedef struct thread_data_t {
   int clientfd;
@@ -38,6 +39,7 @@ pthread_mutex_t lock;
 void write_file_back_to_client(int clientfd);
 void write_bytes_to_file(int clientfd);
 void *handle_thread(void *arg);
+void *time_logger(void *arg);
 
 void log_info(const char *message) {
   syslog(LOG_INFO, "%s", message);
@@ -106,6 +108,9 @@ int main(int argc, char **argv) {
   struct listhead head;
   SLIST_INIT(&head);
 
+  // Create a timer thread
+  pthread_create(&time_logger_thread, NULL, time_logger, NULL);
+
   while (!sigterm_received) {
     struct sockaddr_in clientaddr;
     socklen_t clientaddrsize = sizeof(clientaddr);
@@ -162,9 +167,11 @@ int main(int argc, char **argv) {
     }
   }
 
+  pthread_join(time_logger_thread, NULL);
   shutdown(fd, SHUT_RDWR);
   closelog();
   remove(stringdata);
+  printf("Exiting from main.");
   return 0;
 }
 
@@ -206,10 +213,31 @@ void write_file_back_to_client(int clientfd) {
   char buffer[1024] = {0};
   ssize_t received;
   while ((received = read(rfd, buffer, sizeof(buffer))) > 0) {
-    /* printf("Writing buffer back %s\n", buffer); */
-    /* printf("Received bytes: %zi\n", received); */
     send(clientfd, buffer, received, 0);
   }
 
   close(rfd);
+}
+
+void *time_logger(void *arg) {
+  (void)arg;
+  time_t interval = time(NULL);
+  while (!sigterm_received) {
+    time_t current_time = time(NULL);
+    if (current_time - interval > 10) {
+      pthread_mutex_lock(&lock);
+      struct tm *tm = localtime(&current_time);
+      char buf[64];
+      strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S\n", tm);
+
+      int wfd = open(stringdata, O_CREAT | O_WRONLY | O_APPEND,
+                     S_IRUSR | S_IRGRP | S_IROTH | S_IWUSR | S_IWGRP | S_IWOTH);
+      write(wfd, buf, 64);
+      close(wfd);
+      pthread_mutex_unlock(&lock);
+      interval = current_time;
+    }
+    sleep(1);
+  }
+  return NULL;
 }
