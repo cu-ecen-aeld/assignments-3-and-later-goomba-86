@@ -237,7 +237,8 @@ void *time_logger(void *arg) {
 
       int wfd = open(stringdata, O_CREAT | O_WRONLY | O_APPEND,
                      S_IRUSR | S_IRGRP | S_IROTH | S_IWUSR | S_IWGRP | S_IWOTH);
-      write(wfd, buf, len);
+      int ret = write(wfd, buf, len);
+      (void)ret;
       close(wfd);
       interval = current_time;
       pthread_mutex_unlock(&lock);
