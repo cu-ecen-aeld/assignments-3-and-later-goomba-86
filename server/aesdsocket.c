@@ -18,6 +18,7 @@
 
 static int fd = 0;
 static char const *const stringdata = "/var/tmp/aesdsocketdata";
+static bool sigterm_received = false;
 
 typedef struct thread_data_t {
   int clientfd;
@@ -45,16 +46,8 @@ void log_info(const char *message) {
 
 void handle_signal(int signal) {
   if (signal == SIGINT || signal == SIGTERM) {
-
-    // TODO: wait for threads to complete
-    /* entry_t *iter; */
-    /* SLIST_FOREACH(iter, &listhead, entries); */
-
-    shutdown(fd, SHUT_RDWR);
     log_info("Caught signal, exiting");
-    closelog();
-    remove(stringdata);
-    exit(0);
+    sigterm_received = true;
   }
 }
 
@@ -113,7 +106,7 @@ int main(int argc, char **argv) {
   struct listhead head;
   SLIST_INIT(&head);
 
-  while (true) {
+  while (!sigterm_received) {
     struct sockaddr_in clientaddr;
     socklen_t clientaddrsize = sizeof(clientaddr);
     int clientfd = accept(fd, (struct sockaddr *)&clientaddr, &clientaddrsize);
@@ -130,7 +123,8 @@ int main(int argc, char **argv) {
     thread_data_t *new_data = malloc(sizeof(thread_data_t));
     new_data->clientfd = clientfd;
     new_data->thread_completed = false;
-    if (pthread_create(&new_data->threadid, NULL, handle_thread, NULL) != 0) {
+    if (pthread_create(&new_data->threadid, NULL, handle_thread,
+                       (void *)new_data) != 0) {
       syslog(LOG_ERR, "Thread creation failed.");
       exit(1);
     }
@@ -152,9 +146,24 @@ int main(int argc, char **argv) {
       }
     }
 
-    printf("Closed connection from %s\n", ipstr);
+    /* printf("Closed connection from %s\n", ipstr); */
   }
 
+  while (!SLIST_EMPTY(&head)) {
+    entry_t *iter, *tmp;
+    SLIST_FOREACH_SAFE(iter, &head, entries, tmp) {
+      if (iter->data->thread_completed) {
+        SLIST_REMOVE(&head, iter, entry_t, entries);
+        pthread_join(iter->data->threadid, NULL);
+        close(iter->data->clientfd);
+        free(iter->data);
+        free(iter);
+      }
+    }
+  }
+
+  shutdown(fd, SHUT_RDWR);
+  closelog();
   remove(stringdata);
   return 0;
 }
@@ -166,7 +175,7 @@ void *handle_thread(void *arg) {
   write_file_back_to_client(data->clientfd);
   data->thread_completed = true;
   pthread_mutex_unlock(&lock);
-  return arg;
+  return NULL;
 }
 
 void write_bytes_to_file(int clientfd) {
