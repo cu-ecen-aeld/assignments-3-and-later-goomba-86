@@ -20,6 +20,7 @@ static int fd = 0;
 static char const *const stringdata = "/var/tmp/aesdsocketdata";
 static bool sigterm_received = false;
 static pthread_t time_logger_thread;
+static struct listhead head;
 
 typedef struct thread_data_t {
   int clientfd;
@@ -50,6 +51,24 @@ void handle_signal(int signal) {
   if (signal == SIGINT || signal == SIGTERM) {
     log_info("Caught signal, exiting");
     sigterm_received = true;
+
+    while (!SLIST_EMPTY(&head)) {
+      entry_t *iter, *tmp;
+      SLIST_FOREACH_SAFE(iter, &head, entries, tmp) {
+        if (iter->data->thread_completed) {
+          SLIST_REMOVE(&head, iter, entry_t, entries);
+          pthread_join(iter->data->threadid, NULL);
+          close(iter->data->clientfd);
+          free(iter->data);
+          free(iter);
+        }
+      }
+    }
+
+    pthread_join(time_logger_thread, NULL);
+    shutdown(fd, SHUT_RDWR);
+    closelog();
+    remove(stringdata);
   }
 }
 
@@ -76,6 +95,7 @@ int main(int argc, char **argv) {
 
   fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
   if (fd < 0) {
+    freeaddrinfo(res);
     return -1;
   }
 
@@ -83,8 +103,11 @@ int main(int argc, char **argv) {
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
 
   if (bind(fd, res->ai_addr, res->ai_addrlen) < 0) {
+    freeaddrinfo(res);
     return -1;
   }
+
+  freeaddrinfo(res);
 
   if (argc > 1 && strcmp(argv[1], "-d") == 0) {
     pid_t pid = fork();
@@ -99,13 +122,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  freeaddrinfo(res);
-
   if (listen(fd, 10)) {
     return -1;
   }
 
-  struct listhead head;
   SLIST_INIT(&head);
 
   // Create a timer thread
@@ -154,38 +174,19 @@ int main(int argc, char **argv) {
     /* printf("Closed connection from %s\n", ipstr); */
   }
 
-  while (!SLIST_EMPTY(&head)) {
-    entry_t *iter, *tmp;
-    SLIST_FOREACH_SAFE(iter, &head, entries, tmp) {
-      if (iter->data->thread_completed) {
-        SLIST_REMOVE(&head, iter, entry_t, entries);
-        pthread_join(iter->data->threadid, NULL);
-        close(iter->data->clientfd);
-        free(iter->data);
-        free(iter);
-      }
-    }
-  }
-
-  pthread_join(time_logger_thread, NULL);
-  shutdown(fd, SHUT_RDWR);
-  closelog();
-  remove(stringdata);
-  printf("Exiting from main.");
   return 0;
 }
 
 void *handle_thread(void *arg) {
   thread_data_t *data = (thread_data_t *)arg;
-  pthread_mutex_lock(&lock);
   write_bytes_to_file(data->clientfd);
   write_file_back_to_client(data->clientfd);
   data->thread_completed = true;
-  pthread_mutex_unlock(&lock);
   return NULL;
 }
 
 void write_bytes_to_file(int clientfd) {
+  pthread_mutex_lock(&lock);
   int wfd = open(stringdata, O_CREAT | O_WRONLY | O_APPEND,
                  S_IRUSR | S_IRGRP | S_IROTH | S_IWUSR | S_IWGRP | S_IWOTH);
 
@@ -201,9 +202,11 @@ void write_bytes_to_file(int clientfd) {
     }
   }
   close(wfd);
+  pthread_mutex_unlock(&lock);
 }
 
 void write_file_back_to_client(int clientfd) {
+  pthread_mutex_lock(&lock);
   int rfd = open(stringdata, O_RDONLY);
 
   if (rfd < 0) {
@@ -215,8 +218,8 @@ void write_file_back_to_client(int clientfd) {
   while ((received = read(rfd, buffer, sizeof(buffer))) > 0) {
     send(clientfd, buffer, received, 0);
   }
-
   close(rfd);
+  pthread_mutex_unlock(&lock);
 }
 
 void *time_logger(void *arg) {
@@ -226,18 +229,23 @@ void *time_logger(void *arg) {
     time_t current_time = time(NULL);
     if (current_time - interval > 10) {
       pthread_mutex_lock(&lock);
-      struct tm *tm = localtime(&current_time);
-      char buf[64];
-      strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S\n", tm);
+      struct tm tm_struct;
+      localtime_r(&current_time, &tm_struct);
+      char buf[64] = {};
+      int len = strftime(buf, sizeof(buf), "timestamp:%a, %d %b %Y %T %z\n",
+                         &tm_struct);
 
       int wfd = open(stringdata, O_CREAT | O_WRONLY | O_APPEND,
                      S_IRUSR | S_IRGRP | S_IROTH | S_IWUSR | S_IWGRP | S_IWOTH);
-      write(wfd, buf, 64);
+      write(wfd, buf, len);
       close(wfd);
-      pthread_mutex_unlock(&lock);
       interval = current_time;
+      pthread_mutex_unlock(&lock);
     }
-    sleep(1);
+    struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = 50000000;
+    nanosleep(&ts, NULL);
   }
   return NULL;
 }
